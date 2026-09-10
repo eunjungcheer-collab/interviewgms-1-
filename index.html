@@ -2777,6 +2777,14 @@ function buildWrongListFromSheetRows(rows){
   });
   return Object.values(wrongMap);
 }
+function buildWrongListForRowDate(rows, dateISO){
+  // 제출 건별 기록의 특정 한 줄(세션)만 콕 집어서 그 세션의 오답만 모음
+  const row = rows.find(r=>r.date===dateISO);
+  if(!row) return [];
+  let records = [];
+  try{ records = JSON.parse(row.records || '[]'); }catch(e){ records=[]; }
+  return records.filter(r=>r.score < WRONG_THRESHOLD && QMAP[r.id]).map(r=>({id:r.id, lastAnswer:r.answer, lastScore:r.score}));
+}
 function buildWrongListForDate(rows, dateKey){
   // 특정 날짜에 "완료된" 세션들에서만 오답을 모음 (그 날 제출한 것 기준)
   const map = {};
@@ -2962,6 +2970,7 @@ async function fetchAllStudentsFromSheet(){
       lastDate: parseSheetDateTime(r.lastDate),
       todayCount: Number(r.todayCount||0),
       todayAvg: (r.todayAvg==null || r.todayAvg==='') ? null : Math.round(Number(r.todayAvg)),
+      todayInProgressQuestions: Number(r.todayInProgressQuestions||0),
       totalQuestions: Number(r.totalQuestions||0)
     }))
     .filter(s=>s.name)
@@ -2981,8 +2990,14 @@ function renderSheetAllList(list){
     const deltaHtml = cp
       ? (delta>0 ? `<span style="color:var(--navy);font-weight:800;">+${delta}문제</span>` : `<span style="color:var(--sub);">-</span>`)
       : `<span style="color:var(--sub);">—</span>`;
-    const todayHtml = s.todayCount
+    const todayCompletedHtml = s.todayCount
       ? `<span style="color:var(--navy);font-weight:800;">${s.todayCount}회</span><br><span style="color:var(--sub);font-size:11px;">평균 ${s.todayAvg}점</span>`
+      : '';
+    const todayInProgressHtml = s.todayInProgressQuestions
+      ? `<br><span style="color:#b8860b;font-size:11px;">🟡${s.todayInProgressQuestions}문항 진행중</span>`
+      : '';
+    const todayHtml = (todayCompletedHtml || todayInProgressHtml)
+      ? (todayCompletedHtml || `<span style="color:var(--sub);">-</span>`) + todayInProgressHtml
       : `<span style="color:var(--sub);">-</span>`;
     return `
     <tr class="clickable" data-sheetname="${escapeHtml(s.name)}">
@@ -3122,7 +3137,10 @@ async function showSheetStudentDetail(nm, resultEl){
         <td>${s.count}문항</td>
         <td style="font-weight:700;">${s.isCompleted ? s.score+'점' : '-'}</td>
         <td style="color:var(--sub);font-size:12px;">${s.isCompleted ? escapeHtml(s.modeLabel) : '🟡 진행중(미완료)'}</td>
-        <td><button class="btn-icon-del sessionDeleteBtn" data-date="${escapeHtml(s.date||'')}" data-label="${escapeHtml(s.dt ? s.dt.toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '')} · ${s.count}문항 · ${s.isCompleted?s.score+'점':'진행중'}" title="이 세션만 삭제">🗑️</button></td>
+        <td style="white-space:nowrap;">
+          <button class="btn-icon-del sessionWrongBtn" data-date="${escapeHtml(s.date||'')}" title="이 회차 오답노트만 인쇄/PDF">🖨️</button>
+          <button class="btn-icon-del sessionDeleteBtn" data-date="${escapeHtml(s.date||'')}" data-label="${escapeHtml(s.dt ? s.dt.toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '')} · ${s.count}문항 · ${s.isCompleted?s.score+'점':'진행중'}" title="이 세션만 삭제">🗑️</button>
+        </td>
       </tr>
     `).join('');
     const everWrongList = buildEverWrongListFromSheetRows(rows);
@@ -3167,6 +3185,19 @@ async function showSheetStudentDetail(nm, resultEl){
         const label = `${nm}(${dateKey})`;
         if(pick){ printWrongNote(label, dateWrongList); }
         else { await downloadWrongNotePDF(label, dateWrongList); }
+      };
+    });
+    document.querySelectorAll('.sessionWrongBtn').forEach(btn=>{
+      btn.onclick=async(ev)=>{
+        ev.stopPropagation();
+        const dateISO = btn.dataset.date;
+        const rowWrongList = buildWrongListForRowDate(rows, dateISO);
+        const timeLabel = (()=>{ const dt=parseSheetDateTime(dateISO); return dt? dt.toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '이 회차'; })();
+        if(!rowWrongList.length){ await showAlert(`${timeLabel} 회차에는 오답이 없어요 (다 맞혔어요).`); return; }
+        const pick = await showConfirm(`${timeLabel} 회차 오답노트(${rowWrongList.length}문항)를 인쇄할까요?\n(취소를 누르면 PDF로 저장할 수 있어요)`);
+        const label = `${nm}(${timeLabel})`;
+        if(pick){ printWrongNote(label, rowWrongList); }
+        else { await downloadWrongNotePDF(label, rowWrongList); }
       };
     });
     document.querySelectorAll('.sessionDeleteBtn').forEach(btn=>{
