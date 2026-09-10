@@ -2725,7 +2725,7 @@ async function downloadWrongNotePDF(name, wrongList){
     }
     hideLoadingModal();
     lastPdfFilename = `${name||'학생'}님의 오답노트.pdf`;
-    lastPdfBlobUrl = URL.createObjectURL(pdf.output('blob'));
+    lastPdfBlobUrl = URL.createObjectURL(new File([pdf.output('blob')], lastPdfFilename, {type:'application/pdf'})); // File로 감싸야 '열어서 보기'에서 인쇄할 때도 파일명이 정확히 뜸
     showPdfReadyModal(`📄 ${escapeHtml(name||'학생')}님의 오답노트 PDF가 준비됐어요!<br>아래 버튼을 <b>직접 눌러서</b> 저장하거나 열어 주세요.`);
   }catch(e){
     hideLoadingModal();
@@ -2776,6 +2776,23 @@ function buildWrongListFromSheetRows(rows){
     });
   });
   return Object.values(wrongMap);
+}
+function buildWrongListForDate(rows, dateKey){
+  // 특정 날짜에 "완료된" 세션들에서만 오답을 모음 (그 날 제출한 것 기준)
+  const map = {};
+  rows.forEach(row=>{
+    const dt = parseSheetDateTime(row.date);
+    if(!dt || dt.toLocaleDateString('ko-KR')!==dateKey) return;
+    if((row.modeLabel||'').includes('진행중')) return; // 완료된 저장만
+    let records = [];
+    try{ records = JSON.parse(row.records || '[]'); }catch(e){ records=[]; }
+    records.forEach(r=>{
+      if(r.score < WRONG_THRESHOLD && QMAP[r.id]){
+        map[r.id] = {id:r.id, lastAnswer:r.answer, lastScore:r.score};
+      }
+    });
+  });
+  return Object.values(map);
 }
 function buildEverWrongListFromSheetRows(rows){
   // 누적 오답: 한 번이라도 틀렸으면 나중에 맞혀도 목록에서 빼지 않음
@@ -3067,10 +3084,11 @@ function buildDailyStatsFromSheetRows(rows){
     .sort((a,b)=> (byDate[b.date]?byDate[b.date].ts:0) - (byDate[a.date]?byDate[a.date].ts:0));
 }
 function buildSessionLogFromSheetRows(rows){
-  // 날짜별 집계가 아니라, 실제 세션 하나하나를 시간까지 그대로 보여주기 위한 목록
+  // 날짜별 집계가 아니라, 실제 세션 하나하나를 시간까지 그대로 보여주기 위한 목록.
+  // 완료된 세션뿐 아니라 "진행중"(아직 안 끝난) 세션도 함께 보여줘야, 대시보드 목록의
+  // "최근 제출일"에는 최신 날짜가 뜨는데 여기서는 아무 기록도 안 보이는 혼란이 없음.
   return groupSessionsFromRows(rows)
-    .filter(s=>s.isCompleted)
-    .map(s=>({date:s.date, dt:s.dt, ts:s.ts, count:s.totalCount, score:s.score, modeLabel:s.modeLabel, rowDates:s.rowDates}));
+    .map(s=>({date:s.date, dt:s.dt, ts:s.ts, count:s.totalCount, score:s.score, modeLabel:s.modeLabel, rowDates:s.rowDates, isCompleted:s.isCompleted}));
 }
 async function showSheetStudentDetail(nm, resultEl){
   if(!resultEl) return;
@@ -3090,23 +3108,29 @@ async function showSheetStudentDetail(nm, resultEl){
     const avgAll = totalQForAvg ? Math.round(allSessions.reduce((s,x)=>s+x.score*x.totalCount,0)/totalQForAvg) : 0;
     const daily = buildDailyStatsFromSheetRows(rows);
     const dailyRows = daily.map(d=>`
-      <tr><td style="text-align:left;">${escapeHtml(d.date)}</td><td>${d.count}회</td><td style="font-weight:700;">${d.avg}점</td></tr>
+      <tr>
+        <td style="text-align:left;">${escapeHtml(d.date)}</td>
+        <td>${d.count}회</td>
+        <td style="font-weight:700;">${d.avg}점</td>
+        <td><button class="btn-icon-del dateWrongBtn" data-date="${escapeHtml(d.date)}" title="이 날짜 오답노트만 인쇄/PDF">🖨️</button></td>
+      </tr>
     `).join('');
     const sessionLog = buildSessionLogFromSheetRows(rows).slice(0, 30);
     const sessionRows = sessionLog.map(s=>`
-      <tr>
+      <tr style="${s.isCompleted?'':'background:#fff7e6;'}">
         <td style="text-align:left;">${s.dt ? s.dt.toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-'}</td>
         <td>${s.count}문항</td>
-        <td style="font-weight:700;">${s.score}점</td>
-        <td style="color:var(--sub);font-size:12px;">${escapeHtml(s.modeLabel)}</td>
-        <td><button class="btn-icon-del sessionDeleteBtn" data-date="${escapeHtml(s.date||'')}" data-label="${escapeHtml(s.dt ? s.dt.toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '')} · ${s.count}문항 · ${s.score}점" title="이 세션만 삭제">🗑️</button></td>
+        <td style="font-weight:700;">${s.isCompleted ? s.score+'점' : '-'}</td>
+        <td style="color:var(--sub);font-size:12px;">${s.isCompleted ? escapeHtml(s.modeLabel) : '🟡 진행중(미완료)'}</td>
+        <td><button class="btn-icon-del sessionDeleteBtn" data-date="${escapeHtml(s.date||'')}" data-label="${escapeHtml(s.dt ? s.dt.toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '')} · ${s.count}문항 · ${s.isCompleted?s.score+'점':'진행중'}" title="이 세션만 삭제">🗑️</button></td>
       </tr>
     `).join('');
+    const everWrongList = buildEverWrongListFromSheetRows(rows);
     resultEl.innerHTML = `
-      <div class="infobox">✅ <b>${escapeHtml(nm)}</b> · ${allSessions.length}개 세션 발견 · 전체 평균 ${avgAll}점 · 오답 ${wrongList.length}문항</div>
+      <div class="infobox">✅ <b>${escapeHtml(nm)}</b> · ${allSessions.length}개 세션 발견 · 전체 평균 ${avgAll}점 · 오답 ${wrongList.length}문항 (누적 오답 ${everWrongList.length}문항)</div>
       ${daily.length ? `
       <table style="margin-top:10px;">
-        <thead><tr><th style="text-align:left;">날짜</th><th>제출 횟수</th><th>평균 점수</th></tr></thead>
+        <thead><tr><th style="text-align:left;">날짜</th><th>제출 횟수</th><th>평균 점수</th><th>오답노트</th></tr></thead>
         <tbody>${dailyRows}</tbody>
       </table>` : ''}
       ${sessionLog.length ? `
@@ -3117,14 +3141,34 @@ async function showSheetStudentDetail(nm, resultEl){
         <tbody>${sessionRows}</tbody>
       </table>
       </div>` : ''}
-      <div class="row2" style="margin-top:8px;">
+      <p class="small-note" style="text-align:left;margin-top:14px;margin-bottom:4px;">📕 현재 오답노트 (지금까지 안 틀린 것으로 고쳐진 건 빠짐, ${wrongList.length}문항)</p>
+      <div class="row2" style="margin-top:2px;">
         <button class="btn btn-outline" id="sheetPrintBtn">🖨️ 인쇄하기</button>
         <button class="btn btn-gold" id="sheetPdfBtn">💾 PDF로 저장</button>
+      </div>
+      <p class="small-note" style="text-align:left;margin-top:14px;margin-bottom:4px;">📚 누적 오답노트 (한 번이라도 틀렸으면 나중에 맞혀도 계속 남음, ${everWrongList.length}문항)</p>
+      <div class="row2" style="margin-top:2px;">
+        <button class="btn btn-outline" id="sheetPrintEverBtn">🖨️ 인쇄하기</button>
+        <button class="btn btn-gold" id="sheetPdfEverBtn">💾 PDF로 저장</button>
       </div>
       <button class="btn btn-outline" id="sheetDeleteBtn" style="margin-top:8px;width:auto;color:#b3261e;border-color:#b3261e;padding-left:16px;padding-right:16px;font-size:13px;">🗑️ 이 학생 기록 전체 삭제</button>
     `;
     document.getElementById('sheetPrintBtn').onclick=()=>printWrongNote(nm, wrongList);
     document.getElementById('sheetPdfBtn').onclick=()=>downloadWrongNotePDF(nm, wrongList);
+    document.getElementById('sheetPrintEverBtn').onclick=()=>printWrongNote(nm+'(누적)', everWrongList);
+    document.getElementById('sheetPdfEverBtn').onclick=()=>downloadWrongNotePDF(nm+'(누적)', everWrongList);
+    document.querySelectorAll('.dateWrongBtn').forEach(btn=>{
+      btn.onclick=async(ev)=>{
+        ev.stopPropagation();
+        const dateKey = btn.dataset.date;
+        const dateWrongList = buildWrongListForDate(rows, dateKey);
+        if(!dateWrongList.length){ await showAlert(`${dateKey}에는 오답이 없어요 (다 맞혔거나 그 날 기록이 없어요).`); return; }
+        const pick = await showConfirm(`${dateKey} 오답노트(${dateWrongList.length}문항)를 인쇄할까요?\n(취소를 누르면 PDF로 저장할 수 있어요)`);
+        const label = `${nm}(${dateKey})`;
+        if(pick){ printWrongNote(label, dateWrongList); }
+        else { await downloadWrongNotePDF(label, dateWrongList); }
+      };
+    });
     document.querySelectorAll('.sessionDeleteBtn').forEach(btn=>{
       btn.onclick=async(ev)=>{
         ev.stopPropagation();
@@ -3733,13 +3777,25 @@ function buildAllQHTML(){
       });
     });
   });
+  if(TOP_PAIRS.length){
+    html += `<div style="font-size:13px;font-weight:800;color:#b8860b;margin:14px 0 6px;border-bottom:1px solid #ccc;padding-bottom:3px;">🏆 최상위문제 (꼬리 질문 포함)</div>`;
+    TOP_PAIRS.forEach(pair=>{
+      [pair.main, pair.follow].forEach(q=>{
+        const isFollow = q.id.endsWith('F');
+        html += `<div style="border:1px solid #e6c869;border-radius:5px;padding:8px 10px;margin-bottom:6px;${isFollow?'background:#fffdf0;':''}break-inside:avoid;page-break-inside:avoid;">
+          <div style="font-size:11.5px;font-weight:700;color:#1b2a4a;margin-bottom:3px;">${isFollow?'↳ (꼬리질문) ':''}${q.q}</div>
+          <div style="font-size:10.5px;color:#2f7d5b;"><b>모범답안:</b> ${q.a}</div>
+        </div>`;
+      });
+    });
+  }
   return html;
 }
 function printAllQuestions(){
   const area = document.getElementById('printArea');
   area.innerHTML = `
     <h1 style="font-size:18px;color:#1b2a4a;margin:0 0 4px;">중등 과학 구술면접 전체 문제 + 모범답안</h1>
-    <p style="font-size:11px;color:#666;margin:0 0 10px;">GMS학원 이은정 강사 · 총 ${QUESTIONS.length}문항 · ${new Date().toLocaleDateString('ko-KR')} · ⭐=응용(상) 문항</p>
+    <p style="font-size:11px;color:#666;margin:0 0 10px;">GMS학원 이은정 강사 · 총 ${QUESTIONS.length}문항 + 최상위문제 ${TOP_PAIRS.length*2}문항 · ${new Date().toLocaleDateString('ko-KR')} · ⭐=응용(상) 문항</p>
     ${buildAllQHTML()}
   `;
   area.classList.remove('hidden');
@@ -3766,7 +3822,7 @@ async function downloadAllQuestionsPDF(){
     const usableW = pageW - margin*2;
     let y = margin;
     // 제목
-    helper.innerHTML = `<h1 style="font-size:17px;color:#1b2a4a;margin:0 0 3px;">중등 과학 구술면접 전체 문제 + 모범답안</h1><p style="font-size:10px;color:#666;margin:0;">GMS학원 이은정 강사 · 총 ${QUESTIONS.length}문항 · ${new Date().toLocaleDateString('ko-KR')} · ⭐=응용(상) 문항</p>`;
+    helper.innerHTML = `<h1 style="font-size:17px;color:#1b2a4a;margin:0 0 3px;">중등 과학 구술면접 전체 문제 + 모범답안</h1><p style="font-size:10px;color:#666;margin:0;">GMS학원 이은정 강사 · 총 ${QUESTIONS.length}문항 + 최상위문제 ${TOP_PAIRS.length*2}문항 · ${new Date().toLocaleDateString('ko-KR')} · ⭐=응용(상) 문항</p>`;
     let canvas = await html2canvas(helper,{scale:2,backgroundColor:'#fff',windowWidth:700});
     let imgH = canvas.height*usableW/canvas.width;
     pdf.addImage(canvas.toDataURL('image/jpeg',0.9),'JPEG',margin,y,usableW,imgH);
@@ -3802,8 +3858,33 @@ async function downloadAllQuestionsPDF(){
         if(statusEl) statusEl.textContent=`⏳ 생성 중... ${qNum}/${QUESTIONS.length}문항`;
       }
     }
+    // 최상위문제(꼬리 질문 포함) 섹션 — 본문제와 꼬리질문을 쌍으로 붙여서 표시
+    if(TOP_PAIRS.length){
+      helper.innerHTML=`<div style="font-size:12px;font-weight:800;color:#b8860b;border-bottom:1px solid #ccc;padding-bottom:2px;margin-top:6px;">🏆 최상위문제 (꼬리 질문 포함)</div>`;
+      canvas = await html2canvas(helper,{scale:2,backgroundColor:'#fff',windowWidth:700});
+      imgH = canvas.height*usableW/canvas.width;
+      if(y+imgH > pageH-margin){ pdf.addPage(); y=margin; }
+      pdf.addImage(canvas.toDataURL('image/jpeg',0.9),'JPEG',margin,y,usableW,imgH);
+      y+=imgH+2;
+      for(const pair of TOP_PAIRS){
+        for(const q of [pair.main, pair.follow]){
+          qNum++;
+          const isFollow = q.id.endsWith('F');
+          helper.innerHTML=`<div style="border:1px solid #e6c869;border-radius:5px;padding:7px 9px;background:${isFollow?'#fffdf0':'#fff'};">
+            <div style="font-size:11px;font-weight:700;color:#1b2a4a;margin-bottom:2px;">${isFollow?'↳ (꼬리질문) ':''}${q.q}</div>
+            <div style="font-size:10px;color:#2f7d5b;"><b>모범답안:</b> ${q.a}</div>
+          </div>`;
+          canvas = await html2canvas(helper,{scale:2,backgroundColor:'#fff',windowWidth:700});
+          imgH = canvas.height*usableW/canvas.width;
+          if(y+imgH > pageH-margin){ pdf.addPage(); y=margin; }
+          pdf.addImage(canvas.toDataURL('image/jpeg',0.9),'JPEG',margin,y,usableW,imgH);
+          y+=imgH+3;
+        }
+        if(statusEl) statusEl.textContent=`⏳ 생성 중... ${qNum}/${QUESTIONS.length+TOP_PAIRS.length*2}문항 (최상위문제 포함)`;
+      }
+    }
     lastPdfFilename = `중등과학_구술면접_전체문제_${new Date().toLocaleDateString('ko-KR').replace(/\./g,'').replace(/ /g,'')}.pdf`;
-    lastPdfBlobUrl = URL.createObjectURL(pdf.output('blob'));
+    lastPdfBlobUrl = URL.createObjectURL(new File([pdf.output('blob')], lastPdfFilename, {type:'application/pdf'}));
     if(statusEl) statusEl.textContent='✅ PDF 준비 완료!';
     showPdfReadyModal('📘 전체 문제 + 모범답안 PDF가 준비됐어요!<br>아래 버튼을 <b>직접 눌러서</b> 저장하거나 열어 주세요.');
   }catch(e){
